@@ -35,7 +35,7 @@ it('ships the Platform vocabulary already registered', function (): void {
     expect(app(SyncRegistry::class)->types())->toContain(
         DirectoryResources::BRANCH,
         DirectoryResources::ORGANIZATION,
-        DirectoryResources::ROLE_BINDING,
+        DirectoryResources::EMPLOYEE,
     );
 });
 
@@ -51,12 +51,12 @@ it('ships no projector for any Platform type', function (): void {
     expect($registry->projectableTypes())->toBe([]);
 });
 
-it('requires branch_id to be PRESENT on a role binding, even when null', function (): void {
-    // `branch_id = null` nghĩa là MỌI chi nhánh, không phải "không chi nhánh
-    // nào". Khoá vắng mặt và khoá mang null là hai chuyện khác nhau, và gộp
-    // chúng biến một binding toàn tổ chức thành binding không phạm vi.
-    expect(app(SyncRegistry::class)->definition(DirectoryResources::ROLE_BINDING)->required())
-        ->toContain('branch_id');
+it('owns directory vocabulary only, and leaves authz to the auth package', function (): void {
+    // Một consumer chỉ cần org/branch không phải kéo theo tầng Gate/middleware
+    // của authz; và một thay đổi trong từ vựng quyền không đụng package này.
+    foreach (DirectoryResources::all() as $type) {
+        expect($type)->toStartWith('godx.directory.');
+    }
 });
 
 it('names the known types when asked for one that is not registered', function (): void {

@@ -18,10 +18,14 @@ use Godx\Sync\Registry\SyncRegistry;
  * tên), và tập trường TỐI THIỂU mà payload phải có (để một thay đổi lược đồ phía
  * Platform không lặng lẽ làm rỗng một cột).
  *
- * `authz` nằm ở đây cùng `directory` chứ không phải một hệ riêng: một role
- * binding là một tài nguyên có id, có sequence, có chủ sở hữu — hệt như một chi
- * nhánh. Dựng một đường ống riêng cho nó là nhân đôi máy móc để phục vụ một
- * khác biệt không tồn tại.
+ * TỪ VỰNG AUTHZ KHÔNG nằm ở đây, và đó không phải mâu thuẫn: permission/role/
+ * role_binding đi CHUNG đường ống này (chúng là tài nguyên có id, có phiên bản,
+ * có chủ sở hữu — hệt một chi nhánh), nhưng CHỦ SỞ HỮU của từ vựng ấy là
+ * `platform-laravel-auth`, vì chính nó là thứ diễn giải chúng thành quyền.
+ *
+ * Ranh giới đó có giá trị đo được: một consumer chỉ cần org/branch sẽ không phải
+ * kéo theo tầng Gate/middleware của authz, và một thay đổi trong từ vựng quyền
+ * không đụng tới package này.
  */
 final class DirectoryResources
 {
@@ -33,25 +37,12 @@ final class DirectoryResources
 
     public const EMPLOYEE = 'godx.directory.employee';
 
-    public const PERMISSION = 'godx.authz.permission';
-
-    public const ROLE = 'godx.authz.role';
-
-    public const ROLE_BINDING = 'godx.authz.role_binding';
-
     /** @var array<string, list<string>> */
     private const REQUIRED = [
         self::ORGANIZATION => ['id', 'name', 'status'],
         self::BRAND => ['id', 'organization_id', 'name'],
         self::BRANCH => ['id', 'organization_id', 'name', 'timezone'],
         self::EMPLOYEE => ['id', 'organization_id', 'email'],
-        self::PERMISSION => ['id', 'slug'],
-        self::ROLE => ['id', 'slug', 'permissions'],
-        // `branch_id` PHẢI có mặt, kể cả khi null: null nghĩa là MỌI chi nhánh,
-        // không phải "không chi nhánh nào". Vắng khoá và khoá mang null là hai
-        // chuyện khác nhau, và gộp chúng lại là cách một binding toàn tổ chức
-        // biến thành binding không phạm vi.
-        self::ROLE_BINDING => ['id', 'user_id', 'role_id', 'organization_id', 'branch_id'],
     ];
 
     /** @return list<string> */
