@@ -93,3 +93,106 @@ it('reads a snapshot page', function (): void {
         ->and($page->rows[0]['sequence'])->toBe(5)
         ->and($page->hasMore)->toBeTrue();
 });
+
+// ─── 304 trên feed ảnh chụp ────────────────────────────────────────────────
+
+function pollRetrying(int $retries = 3): PollTransport
+{
+    return new PollTransport(app(HttpFactory::class), [
+        'endpoint' => 'https://id.godx.jp/sync',
+        'retries' => $retries,
+        'retry_delay_ms' => 0,
+    ]);
+}
+
+it('names 304 for what it is on a snapshot instead of blaming the body', function (): void {
+    // `snapshot()` KHÔNG gửi `If-None-Match`, nên 304 ở đây là lỗi phía
+    // Platform. 304 < 400 nên `failed()` là false và request rơi thẳng vào
+    // `json()` của một thân RỖNG — thông điệp trả về nói "non-JSON body", tức
+    // đổ lỗi cho thân phản hồi trong khi nguyên nhân là mã trạng thái.
+    Http::fake(['*' => Http::response('', 304)]);
+
+    poll()->snapshot('godx.directory.branch', null, 100);
+})->throws(TransportFailure::class, '304');
+
+it('does not blame the body when the snapshot answered 304', function (): void {
+    Http::fake(['*' => Http::response('', 304)]);
+
+    expect(fn () => poll()->snapshot('godx.directory.branch', null, 100))
+        ->toThrow(fn (TransportFailure $e) => expect($e->getMessage())->not->toContain('non-JSON body'));
+});
+
+// ─── Retry chỉ cho lỗi có thể thử lại ──────────────────────────────────────
+
+it('does not retry a 404, which is a valid answer and not a failure', function (): void {
+    // 404 = "đã xoá ở Platform". Thử lại ba lần cho một câu trả lời hợp lệ là
+    // nhân ba tải lên Platform để nghe lại đúng cái nó vừa nói.
+    Http::fake(['*' => Http::response('', 404)]);
+
+    expect(pollRetrying()->fetch('godx.directory.branch', 'br_gone'))->toBeNull();
+
+    $sent = 0;
+    Http::assertSent(function () use (&$sent): bool {
+        $sent++;
+
+        return true;
+    });
+
+    expect($sent)->toBe(1);
+});
+
+it('does not retry a 401, because a credential does not fix itself in 200ms', function (): void {
+    Http::fake(['*' => Http::response('', 401)]);
+
+    try {
+        pollRetrying()->pull('godx.directory.branch', null, 100);
+    } catch (TransportFailure) {
+        // Mã trạng thái vẫn phải nổi lên — bài này đo SỐ LƯỢT, không đo kết cục.
+    }
+
+    $sent = 0;
+    Http::assertSent(function () use (&$sent): bool {
+        $sent++;
+
+        return true;
+    });
+
+    expect($sent)->toBe(1);
+});
+
+it('still retries a 5xx, which is exactly what retry exists for', function (): void {
+    // Chiều ngược: hẹp lại điều kiện retry KHÔNG được phép tắt luôn retry.
+    Http::fake(['*' => Http::response('', 503)]);
+
+    try {
+        pollRetrying()->pull('godx.directory.branch', null, 100);
+    } catch (TransportFailure) {
+    }
+
+    $sent = 0;
+    Http::assertSent(function () use (&$sent): bool {
+        $sent++;
+
+        return true;
+    });
+
+    expect($sent)->toBe(3);
+});
+
+it('still retries a 429, since the answer really is "come back later"', function (): void {
+    Http::fake(['*' => Http::response('', 429)]);
+
+    try {
+        pollRetrying()->pull('godx.directory.branch', null, 100);
+    } catch (TransportFailure) {
+    }
+
+    $sent = 0;
+    Http::assertSent(function () use (&$sent): bool {
+        $sent++;
+
+        return true;
+    });
+
+    expect($sent)->toBe(3);
+});

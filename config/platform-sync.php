@@ -75,4 +75,24 @@ return [
         'max_pages' => (int) env('PLATFORM_SYNC_MAX_PAGES', 50),
     ],
 
+    /*
+    |---------------------------------------------------------------------------
+    | Đối soát
+    |---------------------------------------------------------------------------
+    |
+    | `max_pages` là trần AN TOÀN, không phải hạn ngạch: điều kiện dừng của vòng
+    | đọc ảnh chụp là `has_more` của Platform, tức do BÊN KIA quyết định. Trần
+    | cao hơn của `pull` vì đối soát đọc TOÀN BỘ tập hợp chứ không đọc phần đuôi
+    | mới thay đổi.
+    |
+    | Chạm trần thì lượt đó tự khai là CHƯA ĐẦY ĐỦ và bỏ hẳn chiều `orphan_local`
+    | — phép trừ tập hợp trên nửa ảnh chụp là báo động giả hàng loạt.
+    |
+    */
+
+    'reconcile' => [
+        'page_size' => (int) env('PLATFORM_SYNC_RECONCILE_PAGE_SIZE', 500),
+        'max_pages' => (int) env('PLATFORM_SYNC_RECONCILE_MAX_PAGES', 200),
+    ],
+
 ];

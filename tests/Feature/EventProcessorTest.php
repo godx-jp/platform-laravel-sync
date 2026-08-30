@@ -159,3 +159,40 @@ it('rejects a type that has no projector rather than silently skipping it', func
 
     expect(process($event))->toBe(Verdict::Rejected);
 });
+
+// ─── subject id ↔ data.id ──────────────────────────────────────────────────
+
+it('refuses an envelope whose subject and data.id name two different resources', function (): void {
+    // Sổ nhận, `applied_sequence` và báo cáo lệch đều khoá theo `resourceId()`
+    // cắt từ `subject`; projector của consumer thì gần như luôn ghi theo
+    // `data['id']`. Hai giá trị lệch nhau ⇒ phép chống-ghi-đè canh MỘT tài
+    // nguyên trong khi phép ghi rơi vào tài nguyên KHÁC. Không tầng nào ném
+    // lỗi, và cả hai hàng đều trông bình thường sau đó.
+    $event = Envelopes::make('w1', 10, ['id' => 'w2', 'name' => 'Widget w2']);
+
+    expect(process($event))->toBe(Verdict::Rejected)
+        ->and(FakeProjector::$state)->toBe([])
+        ->and(app(InboxStore::class)->appliedSequence(Envelopes::TYPE, 'w1'))->toBeNull();
+
+    $note = (string) DB::table('platform_sync_inbox')->where('event_id', $event->id)->value('note');
+    expect($note)->toContain('w1')->toContain('w2');
+});
+
+it('leaves a resource type that carries no id key alone', function (): void {
+    // Không phải mọi loại đều đặt danh tính vào `data`. Bắt vạ lây ở đây là
+    // biến một rào đúng thành một cổng chặn dữ liệu hợp lệ.
+    app(SyncRegistry::class)->resource(Envelopes::TYPE)->requires(['name']);
+
+    expect(process(Envelopes::make('w1', 10, ['name' => 'Widget without an id key'])))
+        ->toBe(Verdict::Applied);
+});
+
+it('accepts the ordinary case where subject and data.id agree', function (): void {
+    expect(process(Envelopes::make('w1', 10, ['id' => 'w1', 'name' => 'Widget w1'])))
+        ->toBe(Verdict::Applied);
+});
+
+it('checks identity even on a delete, which still names what it deletes', function (): void {
+    expect(process(Envelopes::make('w1', 10, ['id' => 'w9'], verb: 'deleted')))
+        ->toBe(Verdict::Rejected);
+});

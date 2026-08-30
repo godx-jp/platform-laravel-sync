@@ -101,12 +101,23 @@ final class DriftRecorder
     }
 
     /**
-     * So sánh CHỈ những trường Platform gửi.
+     * So sánh phần GIAO của hai bên — trường mà cả Platform lẫn consumer cùng
+     * có tên.
      *
-     * Consumer gần như luôn giữ thêm cột của riêng nó (khoá cục bộ, cột dẫn
-     * xuất, dấu thời gian). Đòi hai mảng bằng nhau tuyệt đối sẽ báo lệch cho
-     * từng tài nguyên, mãi mãi — và một báo cáo lệch luôn đỏ thì không ai đọc,
-     * tức là mất luôn công cụ.
+     * Bất đối xứng hai chiều, cả hai đều cố ý:
+     *
+     * Consumer giữ thêm cột riêng (khoá cục bộ, cột dẫn xuất, dấu thời gian) —
+     * đòi hai mảng bằng nhau tuyệt đối thì mọi tài nguyên đều lệch, mãi mãi.
+     *
+     * Và Platform gửi thêm trường mà consumer không mirror. Cái này đắt hơn vì
+     * nó KHÔNG nằm trong tay consumer: Platform thêm một cột vào payload là đủ
+     * để MỌI tài nguyên loại đó thành `field_mismatch` vĩnh viễn, không ai sửa
+     * được ở phía này. Một báo cáo lệch luôn đỏ thì không ai đọc — tức là mất
+     * luôn công cụ, và mất đúng lúc nó cần nhất.
+     *
+     * Cái KHÔNG bỏ qua: giao rỗng. Không một trường nào trùng tên nghĩa là
+     * `current()` trả sai lược đồ (hợp đồng đòi "cùng khoá, cùng kiểu"), và im
+     * lặng ở đó sẽ tuyên bố đồng bộ cho một projector chưa so được gì.
      *
      * @param  array<string, mixed>  $remote
      * @param  array<string, mixed>  $local
@@ -115,11 +126,22 @@ final class DriftRecorder
     private function differingFields(array $remote, array $local): array
     {
         $differing = [];
+        $compared = 0;
 
         foreach ($remote as $key => $value) {
-            if (! array_key_exists($key, $local) || ! $this->same($value, $local[$key])) {
+            if (! array_key_exists($key, $local)) {
+                continue;
+            }
+
+            $compared++;
+
+            if (! $this->same($value, $local[$key])) {
                 $differing[] = (string) $key;
             }
+        }
+
+        if ($compared === 0 && $remote !== []) {
+            return array_map(static fn (int|string $key): string => (string) $key, array_keys($remote));
         }
 
         return $differing;

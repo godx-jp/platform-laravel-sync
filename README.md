@@ -33,16 +33,24 @@ transport
 1. loại có đăng ký không?      không → hỏng TO TIẾNG
 2. giành event id (INSERT)     thua  → Duplicate
 3. đủ trường bắt buộc?         thiếu → Rejected   (vị trí KHÔNG tiến)
-4. sequence có tiến không?     không → Stale      (chặn ghi đè bằng dữ liệu cũ)
-5. có khe hở prevsequence?     có    → ghi nhận, KHÔNG chặn hàng đợi
-6. shadow hay live?
+4. subject ↔ data.id khớp?     không → Rejected   (xem ngay dưới)
+5. sequence có tiến không?     không → Stale      (chặn ghi đè bằng dữ liệu cũ)
+6. có khe hở prevsequence?     có    → ghi nhận, KHÔNG chặn hàng đợi
+7. shadow hay live?
        shadow → so sánh, ghi báo cáo lệch, KHÔNG ghi bảng
        live   → projector->apply(), rồi mới đẩy vị trí
 ```
 
-Cửa 3 đứng trước cửa 4 vì payload rác phải bị từ chối kể cả khi nó mang sequence
+Cửa 3 đứng trước cửa 5 vì payload rác phải bị từ chối kể cả khi nó mang sequence
 mới nhất — nếu không, một thay đổi lược đồ phía Platform vừa làm rỗng dữ liệu
 vừa đẩy vị trí lên, khiến bản sửa gửi sau bị coi là cũ.
+
+Cửa 4 giữ một bất biến mà cả hệ đứng trên: sổ nhận, `applied_sequence` và báo
+cáo lệch khoá theo `subject`, còn projector của consumer viết theo `data['id']`.
+Hai giá trị lệch nhau thì phép chống-ghi-đè canh MỘT tài nguyên trong khi phép
+ghi rơi vào tài nguyên KHÁC — không tầng nào ném lỗi, và cả hai hàng trông bình
+thường sau đó. Chỉ kiểm khi payload có khoá `id`: không phải loại nào cũng đặt
+danh tính vào `data`.
 
 ## Nối một consumer
 
@@ -67,6 +75,12 @@ final class BranchProjector implements Projector
 `current()` phải trả về **cùng khoá, cùng kiểu** với `data` của envelope — shadow
 và đối soát so trực tiếp hai mảng này. Trả cột DB thô sẽ làm mọi tài nguyên
 trông như đang lệch.
+
+So sánh chỉ chạy trên **phần giao** hai bên: cột riêng của consumer bị bỏ qua,
+và trường Platform gửi thêm mà consumer không mirror cũng vậy — trường thứ hai
+không nằm trong tay consumer, nên tính nó là lệch thì Platform thêm một cột là
+đủ để báo cáo đỏ vĩnh viễn, và một báo cáo luôn đỏ thì không ai đọc. Giao **rỗng**
+thì ngược lại: đó là `current()` sai lược đồ, và nó được báo là lệch.
 
 Package **cố ý không ship projector nào**. Mỗi consumer có lược đồ riêng; một
 projector "dùng chung" là đoán lược đồ của người khác rồi ghi đè dữ liệu đang
@@ -93,11 +107,18 @@ xanh.
 | lệnh | vai | mã thoát |
 |---|---|---|
 | `sync:pull` | kéo feed, chạy qua sổ nhận | `1` nếu có envelope bị từ chối/hỏng |
-| `sync:reconcile` | liệt kê + so sánh; `--repair` mới ghi | `2` khi có lệch |
+| `sync:reconcile` | liệt kê + so sánh; `--repair` mới ghi | `2` khi có lệch · `1` khi lượt đọc **dở dang** |
 | `sync:status` | loại, chế độ, con trỏ, kết cục | `0` |
 
 `sync:reconcile --repair` bị **từ chối** khi loại còn ở shadow, và nó nói ra —
 người vận hành vừa gõ `--repair` và sẽ tin rằng nó đã chạy.
+
+`sync:reconcile` có trần số trang (`--max-pages`, mặc định
+`platform-sync.reconcile.max_pages`): điều kiện dừng của vòng đọc ảnh chụp là
+`has_more` của **Platform**, nên không trần nghĩa là bên kia quyết định lúc nào
+tiến trình của bạn dừng. Chạm trần thì lượt đó **tự khai là chưa đầy đủ**, bỏ
+hẳn chiều `orphan_local`, và **không bao giờ thoát 0** — phép trừ tập hợp trên
+nửa ảnh chụp là báo động giả hàng loạt, mà `--repair` ở lượt sau xoá theo.
 
 ## Transport
 
@@ -122,9 +143,17 @@ báo bằng tiếng người — thay vì để ba phần tư phương thức n�
    ra và không ai biết.
 2. Feed `changes` có **cursor đục** + **ETag** (304 khi chưa có gì mới).
 3. Feed `snapshot` có cursor — chân đối soát.
-4. `resource` tra một tài nguyên; **404 nghĩa là đã xoá**, không phải lỗi.
+4. `resource` tra một tài nguyên; **404 nghĩa là đã xoá**, không phải lỗi —
+   consumer KHÔNG thử lại nó (chỉ lỗi mạng, 5xx và 429 mới được thử lại; thử lại
+   một câu trả lời hợp lệ là nhân ba tải lên Platform để nghe lại đúng cái nó
+   vừa nói).
 5. `sequence` **đơn điệu theo subject**, và nên kèm `prevsequence`.
-6. Khoá ký + đường xoay khoá (JWKS), không phải một secret dán trong env.
+6. `data['id']` phải **khớp** phần id trong `subject`.
+7. Khoá ký + đường xoay khoá (JWKS), không phải một secret dán trong env.
+
+Feed `snapshot` **không** được trả 304: consumer không gửi `If-None-Match` ở đó
+có chủ đích, vì một trang rỗng đọc thành "Platform không giữ gì" và biến mọi
+hàng cục bộ thành mồ côi.
 
 ## Giao hàng
 

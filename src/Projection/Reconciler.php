@@ -26,6 +26,16 @@ use Illuminate\Support\Str;
  * PHÁT HIỆN và SỬA tách rời. `reconcile()` mặc định chỉ ĐỌC; sửa phải vừa bật
  * live cho loại đó, vừa xin tường minh. Một công cụ vừa đo vừa sửa không phân
  * biệt được "dữ liệu cũ lệch" với "projector sai vừa phá 4000 hàng".
+ *
+ * TRẦN SỐ TRANG, và vì sao nó phải nói ra khi chạm. Vòng đọc ảnh chụp dừng khi
+ * Platform nói `has_more: false` — tức điều kiện dừng do BÊN KIA quyết định.
+ * Một lỗi phân trang phía họ, hay một feed sinh hàng nhanh hơn tốc độ đọc, cho
+ * cùng một hậu quả: tiến trình của consumer chạy mãi, không lỗi, không dấu vết.
+ *
+ * Nhưng dừng sớm mà im lặng còn tệ hơn treo. Đối soát rút kết luận `orphan_local`
+ * bằng phép TRỪ TẬP HỢP ("cục bộ có, ảnh chụp không"), và một vế bị trừ dở dang
+ * biến phép đó thành báo động giả hàng loạt — rồi `--repair` xoá theo. Nên khi
+ * chạm trần: bỏ hẳn chiều ngược, và NÓI RA rằng lượt này chưa đầy đủ.
  */
 final class Reconciler
 {
@@ -37,7 +47,13 @@ final class Reconciler
         private readonly Container $container,
     ) {}
 
-    public function reconcile(string $resourceType, ?string $transportName = null, bool $repair = false, int $limit = 500): ReconcileResult
+    /**
+     * @param  int  $maxPages  Trần số trang ảnh chụp cho MỘT lượt. Xem docblock
+     *                         của lớp: vòng `while ($page->hasMore)` không trần
+     *                         là một vòng lặp mà PLATFORM quyết định lúc nào
+     *                         dừng.
+     */
+    public function reconcile(string $resourceType, ?string $transportName = null, bool $repair = false, int $limit = 500, int $maxPages = 200): ReconcileResult
     {
         $transport = $this->transports->transport($transportName);
 
@@ -68,6 +84,9 @@ final class Reconciler
         $remoteCount = 0;
         $repaired = 0;
 
+        $pages = 0;
+        $hasMore = false;
+
         do {
             $page = $transport->snapshot($resourceType, $cursor, $limit);
 
@@ -86,17 +105,31 @@ final class Reconciler
             }
 
             $cursor = $page->cursor;
-        } while ($page->hasMore);
+            $hasMore = $page->hasMore;
+            $pages++;
+        } while ($hasMore && $pages < $maxPages);
+
+        $truncated = $hasMore;
+
+        $incompleteReason = $truncated
+            ? "Snapshot stopped at the {$maxPages}-page cap with Platform still reporting more rows; {$remoteCount} row(s) were read. The orphan_local sweep was skipped because it cannot be computed from a partial snapshot. Raise --max-pages or narrow the type, then run again."
+            : null;
 
         // Chiều ngược: consumer còn giữ thứ Platform không còn. Duyệt id cục bộ
         // chứ không trừ tập hợp — `localIds()` là iterable để consumer có thể
         // trả về một con trỏ DB thay vì nạp cả bảng vào bộ nhớ.
+        //
+        // Phép này là một phép TRỪ TẬP HỢP, nên nó chỉ có nghĩa khi vế bị trừ
+        // đầy đủ. Ảnh chụp cắt giữa chừng ⇒ mọi hàng cục bộ nằm ở các trang
+        // chưa đọc sẽ bị gọi là mồ côi — hàng loạt, và `--repair` ở lượt sau
+        // xoá theo. Đếm thì vẫn đếm (con số cục bộ là thật), nhưng KHÔNG kết
+        // luận.
         $localCount = 0;
 
         foreach ($projector->localIds() as $localId) {
             $localCount++;
 
-            if (! isset($remoteIds[$localId])) {
+            if (! $truncated && ! isset($remoteIds[$localId])) {
                 $this->drift->recordOrphan($resourceType, $localId, $projector);
             }
         }
@@ -110,6 +143,8 @@ final class Reconciler
             repaired: $repaired,
             repairAllowed: $repairAllowed,
             repairBlockedReason: $repairBlocked,
+            complete: ! $truncated,
+            incompleteReason: $incompleteReason,
         );
     }
 

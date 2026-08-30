@@ -20,13 +20,26 @@ use Throwable;
  *   1. loại tài nguyên có đăng ký không   → không thì hỏng to tiếng, không nuốt
  *   2. đã thấy event id này chưa          → chống trùng, rẻ nhất, đặt trước
  *   3. payload đủ trường bắt buộc chưa    → chặn TRƯỚC khi chạm projector
- *   4. sequence có lùi không               → chặn ghi đè bằng dữ liệu cũ
- *   5. có khe hở không                     → ghi nhận, KHÔNG chặn
- *   6. shadow hay live                     → so sánh, hoặc ghi
+ *   4. subject và data.id có cùng nói một tài nguyên không
+ *   5. sequence có lùi không               → chặn ghi đè bằng dữ liệu cũ
+ *   6. có khe hở không                     → ghi nhận, KHÔNG chặn
+ *   7. shadow hay live                     → so sánh, hoặc ghi
  *
- * Cửa 3 đứng trước cửa 4 vì một payload rác cần bị từ chối kể cả khi nó mang
+ * Cửa 3 đứng trước cửa 5 vì một payload rác cần bị từ chối kể cả khi nó mang
  * sequence mới nhất — nếu không, một thay đổi lược đồ phía Platform sẽ vừa làm
  * rỗng dữ liệu vừa đẩy vị trí lên, khiến bản sửa gửi sau bị coi là cũ.
+ *
+ * Cửa 4 cưỡng chế một BẤT BIẾN mà cả hệ đứng trên, và trước đó không ai kiểm:
+ * mọi phép ghi sổ ở đây — `claim()`, `appliedSequence()`, `advance()`, báo cáo
+ * lệch — khoá theo `resourceId()` cắt từ `subject`, trong khi projector của
+ * consumer viết theo `data['id']`. Hai giá trị đó lệch nhau thì phép
+ * chống-ghi-đè canh MỘT tài nguyên còn phép ghi rơi vào tài nguyên KHÁC: không
+ * tầng nào ném lỗi, cả hai hàng trông bình thường sau đó, và sổ nhận ghi
+ * `applied` cho một thay đổi nó chưa từng đo. Đây là dạng hỏng đắt nhất trong
+ * hệ này — sai lặng, và sai theo hướng ghi đè.
+ *
+ * Chỉ kiểm khi payload CÓ khoá `id`. Không phải loại nào cũng đặt danh tính vào
+ * `data`; bắt vạ lây ở đó là biến một rào đúng thành cổng chặn dữ liệu hợp lệ.
  */
 final class EventProcessor
 {
@@ -49,6 +62,12 @@ final class EventProcessor
 
         if (($missing = $this->missingFields($event, $definition->required())) !== []) {
             $this->settle($event, Verdict::Rejected, 'Payload is missing required field(s): '.implode(', ', $missing).'.');
+
+            return Verdict::Rejected;
+        }
+
+        if (($conflict = $this->identityConflict($event)) !== null) {
+            $this->settle($event, Verdict::Rejected, $conflict);
 
             return Verdict::Rejected;
         }
@@ -114,6 +133,36 @@ final class EventProcessor
             $required,
             static fn (string $field): bool => ! array_key_exists($field, $event->data),
         ));
+    }
+
+    /**
+     * `subject` và `data['id']` phải nói cùng một tài nguyên — xem cửa 4 ở
+     * docblock của lớp.
+     *
+     * Trả về lý do từ chối, hoặc null khi không có gì để nói (payload không
+     * mang khoá `id`, hoặc hai bên khớp).
+     */
+    private function identityConflict(CloudEvent $event): ?string
+    {
+        if (! array_key_exists('id', $event->data)) {
+            return null;
+        }
+
+        $payloadId = $event->data['id'];
+
+        // Không scalar thì không so được, và đoán là sai hướng: một `id` kiểu
+        // mảng/đối tượng là lỗi phía phát, không phải một danh tính khác.
+        $payloadId = is_scalar($payloadId) ? (string) $payloadId : null;
+
+        if ($payloadId === $event->resourceId()) {
+            return null;
+        }
+
+        return sprintf(
+            'Subject names resource [%s] but data.id is [%s]. The inbox keys dedupe and applied_sequence on the subject while the projector writes by data.id, so applying this would guard one resource and overwrite another.',
+            $event->resourceId(),
+            $payloadId ?? gettype($event->data['id']),
+        );
     }
 
     private function gapNote(CloudEvent $event, ?int $applied): ?string
