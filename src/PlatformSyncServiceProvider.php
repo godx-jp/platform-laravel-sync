@@ -40,7 +40,7 @@ final class PlatformSyncServiceProvider extends ServiceProvider
 
         $this->app->singleton(TransportManager::class, fn ($app): TransportManager => new TransportManager(
             $app,
-            $app->make(Config::class)->get('platform-sync', []),
+            $app->make(Config::class),
         ));
 
         // Kết nối được phân giải MỘT lần và dùng chung cho sổ nhận, con trỏ và

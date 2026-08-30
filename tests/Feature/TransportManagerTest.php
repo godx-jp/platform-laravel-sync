@@ -21,7 +21,6 @@ it('keys the cache by CONFIG name, not by driver', function (): void {
     // thường (staging và production). Cache theo tên driver sẽ trả nhầm cái
     // thứ nhất cho cả hai — im lặng, và với endpoint sai.
     config()->set('platform-sync.transports.poll_staging', ['driver' => 'poll', 'endpoint' => 'https://staging.example/sync']);
-    app()->forgetInstance(TransportManager::class);
 
     $manager = app(TransportManager::class);
 
@@ -34,14 +33,12 @@ it('names a transport that is not configured', function (): void {
 
 it('names the driver a configured transport asks for but nobody registered', function (): void {
     config()->set('platform-sync.transports.mq', ['driver' => 'rabbitmq']);
-    app()->forgetInstance(TransportManager::class);
 
     app(TransportManager::class)->transport('mq');
 })->throws(UnknownTransport::class, 'PlatformSync::extend');
 
 it('lets an application register its own driver without touching this package', function (): void {
     config()->set('platform-sync.transports.mq', ['driver' => 'rabbitmq']);
-    app()->forgetInstance(TransportManager::class);
 
     $manager = app(TransportManager::class);
     $manager->extend('rabbitmq', fn (): Transport => new class implements Transport
@@ -53,4 +50,17 @@ it('lets an application register its own driver without touching this package', 
     });
 
     expect($manager->transport('mq')->name())->toBe('rabbitmq');
+});
+
+it('sees a configuration change made after the container already resolved it', function (): void {
+    // Chụp config thành mảng lúc dựng thì `config()->set()` sau đó không có tác
+    // dụng nào, và triệu chứng KHÔNG phải lỗi cấu hình — nó là một lượt gọi
+    // mạng thật tới transport cũ.
+    $manager = app(TransportManager::class);
+    expect($manager->defaultName())->toBe('array');
+
+    config()->set('platform-sync.default', 'poll');
+
+    expect($manager->defaultName())->toBe('poll')
+        ->and($manager->transport())->toBeInstanceOf(PollTransport::class);
 });

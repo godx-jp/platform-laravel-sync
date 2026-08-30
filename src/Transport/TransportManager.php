@@ -6,6 +6,7 @@ namespace Godx\Sync\Transport;
 
 use Godx\Sync\Contracts\Transport;
 use Godx\Sync\Exceptions\UnknownTransport;
+use Illuminate\Contracts\Config\Repository as Config;
 use Illuminate\Contracts\Container\Container;
 use Illuminate\Http\Client\Factory as HttpFactory;
 
@@ -20,6 +21,12 @@ use Illuminate\Http\Client\Factory as HttpFactory;
  *
  * Driver ngoài đăng ký bằng `extend()` — cùng cách `Storage::extend()` làm, nên
  * một consumer thêm RabbitMQ/Kafka không cần sửa package này.
+ *
+ * Cấu hình đọc LƯỜI qua `Config`, không chụp thành mảng lúc dựng. Chụp thì
+ * `config()->set('platform-sync.default', ...)` sau khi container đã phân giải
+ * manager sẽ không có tác dụng nào — và triệu chứng không phải một lỗi cấu hình
+ * mà là một lượt gọi mạng thật tới transport CŨ. Đã mất một vòng gỡ lỗi vì đúng
+ * chuyện đó, ở một bài test tưởng là đang dùng driver `array`.
  */
 final class TransportManager
 {
@@ -29,10 +36,9 @@ final class TransportManager
     /** @var array<string, \Closure(array<string, mixed>, Container): Transport> */
     private array $customCreators = [];
 
-    /** @param  array<string, mixed>  $config */
     public function __construct(
         private readonly Container $container,
-        private array $config,
+        private readonly Config $config,
     ) {}
 
     public function transport(?string $name = null): Transport
@@ -50,7 +56,7 @@ final class TransportManager
 
     public function defaultName(): string
     {
-        return (string) ($this->config['default'] ?? 'poll');
+        return (string) $this->config->get('platform-sync.default', 'poll');
     }
 
     /** Cho test: thay một transport đã dựng sẵn. */
@@ -61,7 +67,7 @@ final class TransportManager
 
     private function resolve(string $name): Transport
     {
-        $config = $this->config['transports'][$name] ?? null;
+        $config = $this->config->get("platform-sync.transports.{$name}");
 
         if (! is_array($config)) {
             throw UnknownTransport::notConfigured($name);
