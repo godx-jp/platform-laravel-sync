@@ -6,6 +6,8 @@ namespace Godx\Sync\Projection;
 
 use Godx\Sync\Contracts\Projector;
 use Godx\Sync\Envelope\CloudEvent;
+use Godx\Sync\Registry\ResourceDefinition;
+use Godx\Sync\Registry\SyncRegistry;
 use Illuminate\Database\ConnectionInterface;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Str;
@@ -22,8 +24,10 @@ final class DriftRecorder
 {
     private string $runId;
 
-    public function __construct(private readonly ConnectionInterface $connection)
-    {
+    public function __construct(
+        private readonly ConnectionInterface $connection,
+        private readonly SyncRegistry $registry,
+    ) {
         $this->runId = (string) Str::ulid();
     }
 
@@ -54,7 +58,7 @@ final class DriftRecorder
             return $this->write($event->resourceType(), $event->resourceId(), DriftKind::MissingLocal, $event->data, null, array_keys($event->data));
         }
 
-        $differing = $this->differingFields($event->data, $local);
+        $differing = $this->differingFields($event->resourceType(), $event->data, $local);
 
         if ($differing === []) {
             return null;
@@ -76,7 +80,7 @@ final class DriftRecorder
             return $this->write($resourceType, $resourceId, DriftKind::MissingLocal, $remote, null, array_keys($remote));
         }
 
-        $differing = $this->differingFields($remote, $local);
+        $differing = $this->differingFields($resourceType, $remote, $local);
 
         return $differing === []
             ? null
@@ -115,6 +119,11 @@ final class DriftRecorder
      * được ở phía này. Một báo cáo lệch luôn đỏ thì không ai đọc — tức là mất
      * luôn công cụ, và mất đúng lúc nó cần nhất.
      *
+     * Phép so từng trường mặc định NHẠY THỨ TỰ, và mặc định đó không đổi: ở
+     * phần lớn payload `[a, b]` khác `[b, a]` thật. Loại nào có trường mà thứ
+     * tự không mang nghĩa thì tự khai bằng `->unordered([...])`, và chỉ những
+     * trường đó mới được so như tập.
+     *
      * Cái KHÔNG bỏ qua: giao rỗng. Không một trường nào trùng tên nghĩa là
      * `current()` trả sai lược đồ (hợp đồng đòi "cùng khoá, cùng kiểu"), và im
      * lặng ở đó sẽ tuyên bố đồng bộ cho một projector chưa so được gì.
@@ -123,8 +132,12 @@ final class DriftRecorder
      * @param  array<string, mixed>  $local
      * @return list<string>
      */
-    private function differingFields(array $remote, array $local): array
+    private function differingFields(string $resourceType, array $remote, array $local): array
     {
+        $unordered = $this->registry->has($resourceType)
+            ? $this->registry->definition($resourceType)->unorderedFields()
+            : [];
+
         $differing = [];
         $compared = 0;
 
@@ -135,7 +148,11 @@ final class DriftRecorder
 
             $compared++;
 
-            if (! $this->same($value, $local[$key])) {
+            $same = in_array((string) $key, $unordered, true)
+                ? $this->sameUnordered($value, $local[$key])
+                : $this->same($value, $local[$key]);
+
+            if (! $same) {
                 $differing[] = (string) $key;
             }
         }
@@ -165,6 +182,43 @@ final class DriftRecorder
         }
 
         return json_encode($remote) === json_encode($local);
+    }
+
+    /**
+     * So một trường mà consumer đã khai là KHÔNG có thứ tự
+     * ({@see ResourceDefinition::unordered()}).
+     *
+     * Bỏ THỨ TỰ, giữ SỐ LẦN. Sắp rồi so từng phần tử nghĩa là `[a, a, b]` vẫn
+     * khác `[a, b]` — một permission bị lặp là dữ liệu hỏng, và một phép so
+     * "tập" theo nghĩa toán học sẽ nuốt nó im lặng. Thứ khai ở đây là "hai bên
+     * liệt kê khác thứ tự", không phải "đừng nhìn kỹ".
+     *
+     * Khai `unordered` cho một trường không phải mảng thì không có nghĩa gì —
+     * rơi về phép so thường, chứ không âm thầm thành "bằng nhau".
+     */
+    private function sameUnordered(mixed $remote, mixed $local): bool
+    {
+        if (! is_array($remote) || ! is_array($local)) {
+            return $this->same($remote, $local);
+        }
+
+        return $this->sortedForCompare($remote) === $this->sortedForCompare($local);
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $value
+     * @return list<string>
+     */
+    private function sortedForCompare(array $value): array
+    {
+        $encoded = array_map(
+            static fn (mixed $item): string => (string) json_encode($item),
+            array_values($value),
+        );
+
+        sort($encoded);
+
+        return $encoded;
     }
 
     /**

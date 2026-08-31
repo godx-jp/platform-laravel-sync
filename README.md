@@ -86,6 +86,24 @@ không nằm trong tay consumer, nên tính nó là lệch thì Platform thêm m
 đủ để báo cáo đỏ vĩnh viễn, và một báo cáo luôn đỏ thì không ai đọc. Giao **rỗng**
 thì ngược lại: đó là `current()` sai lược đồ, và nó được báo là lệch.
 
+### Trường mà THỨ TỰ không mang nghĩa
+
+Phép so mặc định **nhạy thứ tự**, và mặc định đó đúng: `[a, b]` khác `[b, a]` ở
+thứ tự hiển thị, thứ tự ưu tiên, một chuỗi sự kiện. Nhưng có trường mà hai bên
+chỉ tình cờ liệt kê khác nhau — tập permission của một vai là ví dụ đã đo được:
+consumer sắp nó cho dễ đọc, Platform trả lại đúng thứ tự nó nhận, và **mọi** vai
+thành `field_mismatch` vĩnh viễn.
+
+```php
+app(SyncRegistry::class)
+    ->resource('godx.authz.role')
+    ->unordered(['permissions']);
+```
+
+Bỏ **thứ tự**, giữ **số lần**: `[a, a, b]` vẫn khác `[a, b]`, vì một phần tử bị
+lặp là dữ liệu hỏng chứ không phải cách liệt kê khác. Khai cho một trường không
+phải mảng thì rơi về phép so thường — không âm thầm thành "bằng nhau".
+
 Package **cố ý không ship projector nào**. Mỗi consumer có lược đồ riêng; một
 projector "dùng chung" là đoán lược đồ của người khác rồi ghi đè dữ liệu đang
 chạy.

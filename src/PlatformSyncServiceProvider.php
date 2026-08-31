@@ -53,7 +53,13 @@ final class PlatformSyncServiceProvider extends ServiceProvider
 
         $this->app->singleton(InboxStore::class, fn ($app): InboxStore => new InboxStore($connection($app)));
         $this->app->singleton(CursorStore::class, fn ($app): CursorStore => new CursorStore($connection($app)));
-        $this->app->singleton(DriftRecorder::class, fn ($app): DriftRecorder => new DriftRecorder($connection($app)));
+        // Registry đi kèm vì phép so lệch phải biết trường nào của loại này là
+        // TẬP chứ không phải danh sách (`->unordered([...])`) — không có nó,
+        // hai bên liệt kê cùng một tập theo thứ tự khác nhau sẽ báo lệch mãi.
+        $this->app->singleton(DriftRecorder::class, fn ($app): DriftRecorder => new DriftRecorder(
+            $connection($app),
+            $app->make(SyncRegistry::class),
+        ));
 
         $this->app->singleton(EventProcessor::class, fn ($app): EventProcessor => new EventProcessor(
             $app->make(SyncRegistry::class),
