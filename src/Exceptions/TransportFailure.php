@@ -32,6 +32,29 @@ final class TransportFailure extends RuntimeException
         return new self("Transport [{$transport}] returned a non-JSON body for [{$what}].");
     }
 
+    /**
+     * Lỗi của một transport hàng đợi, nơi KHÔNG có mã trạng thái HTTP.
+     *
+     * `http()` không dùng được ở đây, và ép một mã giả (0, 500) vào nó là cách
+     * chắc chắn để người đọc đi tìm một phản hồi HTTP chưa bao giờ tồn tại.
+     */
+    public static function queue(string $transport, string $what, string $detail): self
+    {
+        return new self("Transport [{$transport}] failed while {$what}: {$detail}.");
+    }
+
+    /**
+     * Transport đúng driver nhưng thiếu cấu hình để chạy.
+     *
+     * Tách khỏi `UnknownTransport` có chủ đích: ở đó driver không tồn tại, ở
+     * đây nó tồn tại và sẵn sàng — chỉ thiếu một giá trị, và thông điệp phải
+     * nêu đúng KHOÁ cấu hình còn trống chứ không nói chung chung.
+     */
+    public static function misconfigured(string $transport, string $detail): self
+    {
+        return new self("Transport [{$transport}] is not fully configured: {$detail}");
+    }
+
     public static function cannot(string $transport, string $capability): self
     {
         return new self("Transport [{$transport}] does not support [{$capability}]. Configure a transport that implements it, or run the command with a driver that does.");

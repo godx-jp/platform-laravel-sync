@@ -4,9 +4,12 @@ declare(strict_types=1);
 
 namespace Godx\Sync\Console;
 
+use Godx\Sync\Contracts\SnapshotsResource;
 use Godx\Sync\Projection\Reconciler;
 use Godx\Sync\Registry\SyncRegistry;
+use Godx\Sync\Transport\TransportManager;
 use Illuminate\Console\Command;
+use Throwable;
 
 final class ReconcileCommand extends Command
 {
@@ -19,12 +22,22 @@ final class ReconcileCommand extends Command
 
     protected $description = 'Compare Platform state against local state and record drift. Read-only unless --repair.';
 
-    public function handle(Reconciler $reconciler, SyncRegistry $registry): int
+    public function handle(Reconciler $reconciler, SyncRegistry $registry, TransportManager $transports): int
     {
         $types = $this->option('type') ?: $registry->projectableTypes();
 
         if ($types === []) {
             $this->components->error('No resource type has a projector registered; there is nothing to reconcile against.');
+
+            return self::FAILURE;
+        }
+
+        $transportName = $this->snapshotTransportName();
+
+        if (($refusal = $this->refuseUnlessItCanSnapshot($transports, $transportName)) !== null) {
+            foreach ($refusal as $line) {
+                $this->components->error($line);
+            }
 
             return self::FAILURE;
         }
@@ -35,7 +48,7 @@ final class ReconcileCommand extends Command
         foreach ($types as $type) {
             $result = $reconciler->reconcile(
                 resourceType: $type,
-                transportName: $this->option('transport'),
+                transportName: $transportName,
                 repair: (bool) $this->option('repair'),
                 limit: (int) ($this->option('limit') ?: config('platform-sync.reconcile.page_size', 500)),
                 maxPages: (int) ($this->option('max-pages') ?: config('platform-sync.reconcile.max_pages', 200)),
@@ -82,5 +95,90 @@ final class ReconcileCommand extends Command
         }
 
         return $drifted ? 2 : self::SUCCESS;
+    }
+
+    /**
+     * `--transport` → `platform-sync.reconcile.transport` → mặc định.
+     *
+     * Nấc giữa tồn tại vì kiến trúc của ADR 0002 là "sự kiện qua SQS, ảnh chụp
+     * qua HTTP": bắt người vận hành gõ `--transport=poll` mỗi lần chạy nghĩa là
+     * một job có lịch quên gõ nó sẽ đỏ mãi mãi, và cách sửa nhanh nhất khi đó
+     * là gỡ luôn job đối soát — tức gỡ đúng chân duy nhất bắt được event bị mất.
+     */
+    private function snapshotTransportName(): ?string
+    {
+        $option = $this->option('transport');
+
+        if (is_string($option) && $option !== '') {
+            return $option;
+        }
+
+        $configured = config('platform-sync.reconcile.transport');
+
+        return is_string($configured) && $configured !== '' ? $configured : null;
+    }
+
+    /**
+     * Nói bằng tiếng người khi transport không chụp được, thay vì để
+     * `TransportFailure` nổi lên thành stack trace.
+     *
+     * `Reconciler` vẫn ném — rào đó phải ở lại, vì nó bảo vệ mọi người gọi khác
+     * chứ không riêng lệnh này. Nhưng người vận hành gõ `sync:reconcile` trên
+     * một hệ chạy SQS thì gặp đúng tình huống này ở lượt đầu tiên, mỗi lần cài
+     * mới, và một stack trace ở đó không nói được điều duy nhất cần nói: hàng
+     * đợi KHÔNG liệt kê được trạng thái hiện tại, và đó không phải lỗi cấu hình
+     * của ai cả.
+     *
+     * @return list<string>|null
+     */
+    private function refuseUnlessItCanSnapshot(TransportManager $transports, ?string $name): ?array
+    {
+        try {
+            $transport = $transports->transport($name);
+        } catch (Throwable) {
+            // Tên sai / chưa khai: `Reconciler` sẽ ném đúng thông điệp của
+            // `UnknownTransport`, và nó đã nêu tên khoá cấu hình còn thiếu.
+            return null;
+        }
+
+        if ($transport instanceof SnapshotsResource) {
+            return null;
+        }
+
+        $capable = $this->snapshotCapableNames($transports);
+        $suggestion = $capable === [] ? 'poll' : $capable[0];
+
+        return [
+            sprintf(
+                'Transport [%s] cannot list Platform state, and a full listing is exactly what reconciliation is. A queue only ever hands you what changed, so it can never answer "am I missing something I do not know I am missing".',
+                $transport->name(),
+            ),
+            sprintf('Run it against a snapshot-capable transport: sync:reconcile --transport=%s', $suggestion),
+            sprintf(
+                'Or keep events on [%s] and point only snapshots at HTTP: set platform-sync.reconcile.transport (PLATFORM_SYNC_RECONCILE_TRANSPORT) to %s.',
+                $transport->name(),
+                $suggestion,
+            ),
+            'Configured transports that can snapshot: '.($capable === [] ? 'none' : implode(', ', $capable)).'.',
+        ];
+    }
+
+    /** @return list<string> */
+    private function snapshotCapableNames(TransportManager $transports): array
+    {
+        $capable = [];
+
+        foreach ($transports->names() as $name) {
+            try {
+                if ($transports->transport($name) instanceof SnapshotsResource) {
+                    $capable[] = $name;
+                }
+            } catch (Throwable) {
+                // Một transport khai thiếu cấu hình không được làm hỏng câu trả
+                // lời về các transport khác.
+            }
+        }
+
+        return $capable;
     }
 }

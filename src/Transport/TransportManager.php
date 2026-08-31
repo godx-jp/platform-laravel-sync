@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Godx\Sync\Transport;
 
+use Aws\Sqs\SqsClient;
 use Godx\Sync\Contracts\Transport;
 use Godx\Sync\Exceptions\UnknownTransport;
 use Illuminate\Contracts\Config\Repository as Config;
@@ -56,13 +57,70 @@ final class TransportManager
 
     public function defaultName(): string
     {
-        return (string) $this->config->get('platform-sync.default', 'poll');
+        return (string) $this->config->get('platform-sync.default', 'sqs');
+    }
+
+    /**
+     * Mọi transport ĐANG ĐƯỢC KHAI trong cấu hình.
+     *
+     * Có để một lệnh nói được câu "driver này không làm được việc đó, những cái
+     * SAU ĐÂY thì làm được" thay vì câu "driver này không làm được việc đó" rồi
+     * bỏ người vận hành lại với một file cấu hình phải tự đọc.
+     *
+     * @return list<string>
+     */
+    public function names(): array
+    {
+        $transports = $this->config->get('platform-sync.transports', []);
+
+        return is_array($transports) ? array_values(array_map(strval(...), array_keys($transports))) : [];
     }
 
     /** Cho test: thay một transport đã dựng sẵn. */
     public function set(string $name, Transport $transport): void
     {
         $this->resolved[$name] = $transport;
+    }
+
+    /**
+     * Client SQS dựng từ cấu hình của transport, KHÔNG từ `config/queue.php`.
+     *
+     * Hai thứ đó trùng tên nhà cung cấp chứ không trùng vai: `queue.sqs` là nơi
+     * ứng dụng ĐẨY job của chính nó; ở đây consumer KÉO event của Platform từ
+     * một hàng đợi do repo khác sở hữu, thường bằng credential khác. Mượn cấu
+     * hình của nhau là cách để một lần đổi queue của app làm câm luồng danh
+     * tính, im lặng.
+     *
+     * Không khai `credentials` là CỐ Ý khi cấu hình bỏ trống: SDK rơi về chuỗi
+     * mặc định (biến môi trường → IAM role), và IAM role mới là hình dạng đúng
+     * trên hạ tầng thật — ADR 0002 cấm bấm tay trên console, credential dán
+     * trong env là cùng một loại nợ.
+     *
+     * @param  array<string, mixed>  $config
+     */
+    private static function sqsClient(array $config): SqsClient
+    {
+        $args = [
+            'version' => (string) ($config['version'] ?? 'latest'),
+            'region' => (string) ($config['region'] ?? 'ap-northeast-1'),
+        ];
+
+        if (($endpoint = $config['endpoint'] ?? null) !== null && $endpoint !== '') {
+            $args['endpoint'] = (string) $endpoint;
+        }
+
+        $key = $config['key'] ?? null;
+        $secret = $config['secret'] ?? null;
+
+        if (is_string($key) && $key !== '' && is_string($secret) && $secret !== '') {
+            $args['credentials'] = array_filter([
+                'key' => $key,
+                'secret' => $secret,
+                'token' => $config['token'] ?? null,
+            ], static fn (mixed $value): bool => $value !== null && $value !== '');
+        }
+
+        return new SqsClient($args);
     }
 
     private function resolve(string $name): Transport
@@ -82,6 +140,7 @@ final class TransportManager
         return match ($driver) {
             'array' => new ArrayTransport,
             'poll' => new PollTransport($this->container->make(HttpFactory::class), $config),
+            'sqs' => new SqsTransport(self::sqsClient($config), $config),
             default => throw UnknownTransport::noDriver($driver, $name),
         };
     }

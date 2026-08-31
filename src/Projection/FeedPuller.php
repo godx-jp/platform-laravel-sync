@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Godx\Sync\Projection;
 
+use Godx\Sync\Contracts\AcknowledgesDelivery;
 use Godx\Sync\Contracts\PullsChanges;
 use Godx\Sync\Exceptions\TransportFailure;
 use Godx\Sync\Inbox\CursorStore;
@@ -17,6 +18,17 @@ use Godx\Sync\Transport\TransportManager;
  * chết giữa trang thành mất dữ liệu vĩnh viễn — lần chạy sau bắt đầu từ sau
  * đoạn chưa xử lý xong. Ngược lại, tiến sau thì lần chạy lại sẽ kéo trùng, và
  * trùng thì lưới chống trùng ở inbox nuốt gọn. Chọn hướng hỏng có sửa được.
+ *
+ * Với transport hàng đợi, "tiến con trỏ" không tồn tại — thứ tương đương là
+ * XOÁ message, và nó phải xảy ra ở đây, TỪNG envelope một, ngay sau khi sổ nhận
+ * có kết cục. Cùng một luật, chỉ khác cách phát biểu: không được nói "xong" với
+ * bên phát trước khi kết cục đã nằm bền trong DB.
+ *
+ * Luật xoá là `Verdict::settled()`, không phải "không có lỗi". `Rejected` được
+ * xoá (envelope sai lược đồ sẽ sai y hệt lần sau, và sổ nhận đã giữ nguyên văn
+ * nó); `Failed` thì KHÔNG (projector đổ có thể là sự cố nhất thời — DB đầy, một
+ * deadlock — và hàng đợi đã có sẵn cơ chế thử lại kèm dead-letter). `Claimed`
+ * cũng không, vì nó nghĩa là chưa có kết cục nào cả.
  */
 final class FeedPuller
 {
@@ -53,6 +65,12 @@ final class FeedPuller
                 $verdict = $this->processor->process($event);
                 $verdicts[$verdict->value] = ($verdicts[$verdict->value] ?? 0) + 1;
                 $pulled++;
+
+                if ($transport instanceof AcknowledgesDelivery) {
+                    $verdict->settled()
+                        ? $transport->ack($event->id)
+                        : $transport->abandon($event->id, "verdict [{$verdict->value}] is not settled");
+                }
             }
 
             $cursor = $page->cursor;

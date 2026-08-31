@@ -39,7 +39,11 @@ transport
 7. shadow hay live?
        shadow → so sánh, ghi báo cáo lệch, KHÔNG ghi bảng
        live   → projector->apply(), rồi mới đẩy vị trí
+8. transport là hàng đợi?      ack() — CHỈ khi kết cục đã "settled"
 ```
+
+Cửa 8 chỉ tồn tại cho transport khai `AcknowledgesDelivery` (SQS). Với feed HTTP,
+"đã xong" nói bằng cách đẩy con trỏ, và con trỏ nằm trong tay consumer.
 
 Cửa 3 đứng trước cửa 5 vì payload rác phải bị từ chối kể cả khi nó mang sequence
 mới nhất — nếu không, một thay đổi lược đồ phía Platform vừa làm rỗng dữ liệu
@@ -107,7 +111,7 @@ xanh.
 | lệnh | vai | mã thoát |
 |---|---|---|
 | `sync:pull` | kéo feed, chạy qua sổ nhận | `1` nếu có envelope bị từ chối/hỏng |
-| `sync:reconcile` | liệt kê + so sánh; `--repair` mới ghi | `2` khi có lệch · `1` khi lượt đọc **dở dang** |
+| `sync:reconcile` | liệt kê + so sánh; `--repair` mới ghi | `2` khi có lệch · `1` khi lượt đọc **dở dang**, hoặc khi transport không chụp được |
 | `sync:status` | loại, chế độ, con trỏ, kết cục | `0` |
 
 `sync:reconcile --repair` bị **từ chối** khi loại còn ở shadow, và nó nói ra —
@@ -122,8 +126,27 @@ nửa ảnh chụp là báo động giả hàng loạt, mà `--repair` ở lư�
 
 ## Transport
 
-`poll` là mặc định: consumer chủ động kéo. Webhook đẩy đòi consumer có địa chỉ
-công khai, điều đó loại thẳng mọi consumer sau NAT.
+**`sqs` là mặc định**, vì **ADR 0002** (`godx-jp/godx-tempo`,
+`docs/decisions/0002-platform-tempo-identity-sync.md`, Accepted 2026-08-17) chốt đúng hình dạng đó: transactional outbox trên
+Platform → SNS fanout → **một hàng đợi SQS cho mỗi consumer**, kèm DLQ. Package
+này ra đời **trước** khi ai đọc bản ghi ấy, với `poll` làm mặc định — đó là lý do
+duy nhất `poll` từng đứng ở vị trí này.
+
+**`poll` là PHƯƠNG ÁN LÙI, không phải lựa chọn ngang hàng.** ADR 0002 xét
+"delta feed có cursor (Tempo kéo một endpoint)" ở mục *Alternatives considered*
+rồi **loại**: đúng về scale, rẻ hơn hẳn, nhưng độ trễ sàn bằng chu kỳ poll và
+không đạt yêu cầu "chuẩn quốc tế" mà chủ dự án đã chốt. Dùng nó khi — và chỉ khi:
+
+1. consumer nằm sau NAT / không có đường ra AWS messaging, hoặc
+2. bước 3 của lộ trình ADR (Terraform + relay + consumer) chưa xong.
+
+Cả hai đường dùng **chung** bảng outbox ở bước 1, nên bước 1 không phí trong bất
+kỳ kịch bản nào.
+
+`aws/aws-sdk-php` nằm ở `require`, không phải `suggest`: nó là phụ thuộc của
+driver **mặc định**. Để nó tuỳ chọn thì một consumer cài xong, chạy cron, và đọc
+`Class "Aws\Sqs\SqsClient" not found` trong log lúc 3 giờ sáng — một phụ thuộc
+bắt buộc mà giả vờ tuỳ chọn chỉ dời lỗi từ lúc `composer install` sang lúc chạy.
 
 Thêm driver mà không sửa package:
 
@@ -132,28 +155,167 @@ app(TransportManager::class)->extend('rabbitmq', fn (array $config) => new AmqpT
 ```
 
 Driver khai **năng lực**, không khai một mặt phẳng chung: `PullsChanges`,
-`FetchesResource`, `SnapshotsResource`. Lệnh nào cần năng lực nào thì kiểm và
-báo bằng tiếng người — thay vì để ba phần tư phương thức ném
+`FetchesResource`, `SnapshotsResource`, `AcknowledgesDelivery`. Lệnh nào cần năng
+lực nào thì kiểm và báo bằng tiếng người — thay vì để ba phần tư phương thức ném
 `BadMethodCallException` lúc chạy thật.
+
+| | `sqs` | `poll` |
+|---|---|---|
+| `PullsChanges` | ✅ | ✅ |
+| `AcknowledgesDelivery` | ✅ | — (con trỏ tiến LÀ lời "đã xong") |
+| `SnapshotsResource` | ❌ **không thể** | ✅ |
+| `FetchesResource` | ❌ **không thể** | ✅ |
+
+### Bốn chỗ SQS khác hẳn một feed HTTP
+
+**1. Không có con trỏ.** `ChangePage::$cursor` là `null`, và `pull()` **bỏ qua**
+con trỏ nó nhận được. Vị trí của một consumer SQS không phải giá trị nó lưu — nó
+là trạng thái của chính hàng đợi: message đã xoá thì không quay lại, chưa xoá thì
+sẽ quay lại. Bịa ra một chuỗi (message id cuối, timestamp) rồi cất vào
+`platform_sync_cursors` chỉ tạo ra một con số **trông như** vị trí mà không tầng
+nào đọc.
+
+⚠️ `null` ở đây **không** có nghĩa "quay về đầu feed" — với `poll` thì nó có
+nghĩa đó, và chính vì vậy `PollTransport` cẩn thận trả lại con trỏ **cũ** khi gặp
+304. Hai nghĩa trái ngược sống chung được **chỉ vì** `CursorStore` khoá theo
+`(transport, loại tài nguyên)`. Đừng gộp khoá đó lại.
+
+**2. Xoá là bước RIÊNG.** `pull()` không xoá gì. `FeedPuller` gọi
+`AcknowledgesDelivery::ack()` **sau** khi sổ nhận đã có kết cục cho envelope đó.
+Luật là `Verdict::settled()`, không phải "không có lỗi":
+
+| kết cục | xoá? | vì sao |
+|---|---|---|
+| `applied` · `shadowed` · `gap_noted` · `duplicate` · `stale` | ✅ | đã có kết cục bền trong DB |
+| `rejected` | ✅ | sai lược đồ thì lần giao sau sai y hệt; sổ nhận đã giữ nguyên văn nó cùng lý do |
+| `failed` | ❌ | projector đổ có thể là sự cố nhất thời — để hàng đợi thử lại rồi dead-letter |
+| `claimed` | ❌ | chưa có kết cục nào cả |
+
+Xoá **trong** `pull()` thì một lần chết giữa lúc chiếu làm event bốc hơi vĩnh
+viễn. Xoá **sau** thì một lần chết chỉ dẫn tới giao lần hai, và lưới chống trùng
+nuốt gọn. Chọn hướng hỏng sửa được.
+
+**3. Visibility timeout.** Xử lý lâu hơn timeout ⇒ message hiện lại và được giao
+lần hai **trong khi lượt đầu vẫn đang chạy**. Điều đó **an toàn, và cố ý không
+chống**: `InboxStore::claim()` là một INSERT có khoá chính trên `event_id`, chạy
+**trước** khi projector chạy, nên đúng một tiến trình thắng còn tiến trình kia
+nhận `duplicate`. Đừng dựng heartbeat kéo dài visibility — nó là độ phức tạp cho
+một ca đã được phủ.
+
+Hệ quả phải nuốt, không phải sửa: bản thứ hai xoá message bằng biên nhận **mới**
+của nó, nên bản thứ nhất xong sau sẽ cầm một biên nhận đã chết. `ack()` bỏ qua
+`ReceiptHandleIsInvalid` — nhưng **vẫn ném** mọi lỗi xoá khác (`AccessDenied` là
+ca thật: message không bao giờ rời hàng đợi, và im lặng ở đó là một vòng lặp vô
+tận không ai thấy).
+
+**4. Dead-letter — hai loại hỏng, hai đường ra.**
+
+- *Projector đổ* (`failed`): envelope hợp lệ, sổ nhận có hàng, lý do đã ghi.
+  Driver **không xoá**; redrive policy của SQS đưa nó sang DLQ sau
+  `maxReceiveCount` lượt. Không có dòng mã nào cho đường này — đừng dựng lại thứ
+  hàng đợi đã có.
+- *Thân message không dựng nổi thành envelope*: **không có event id**, nên sổ
+  nhận không bao giờ có hàng và nó không bao giờ "settled". Để mặc thì nó sang
+  DLQ mà **không mang theo một chữ nào về lý do**. Nên driver tự cách ly ngay:
+  `SendMessage` sang `dead_letter_queue_url` kèm `QuarantineReason`, rồi xoá khỏi
+  queue chính. **Không khai DLQ thì không xoá** — xoá một thứ không sao chép được
+  đi đâu là mất dữ liệu do chính ta gây ra, để đổi lấy một hàng đợi sạch mắt.
+
+Một message hỏng **không** chặn message sau: queue chuẩn (không FIFO) không bảo
+toàn thứ tự, và ADR 0002 đã ghi "thứ tự không được giả định" làm bất biến.
+
+### Một hàng đợi chở mọi loại tài nguyên
+
+SNS fanout đổ tất cả vào cùng một queue, trong khi `sync:pull` hỏi theo **từng**
+loại. Nên `resourceType` với driver này là **bộ lọc**, không phải khoá định
+tuyến: envelope thuộc loại khác được **giữ trong bộ nhớ** cho lượt hỏi loại đó,
+chứ không bị xoá và cũng không bị đẩy về bằng `ChangeMessageVisibility(0)`.
+
+Vì sao không đẩy về: mỗi lượt nhận cộng 1 vào `ApproximateReceiveCount`, mà
+`maxReceiveCount` là thứ quyết định message nào rơi xuống DLQ. Bốn loại tài
+nguyên × mỗi lượt cron = bốn lượt nhận cho một message **hoàn toàn lành**; với
+`maxReceiveCount: 5`, hai lượt cron là đủ đẩy dữ liệu đúng vào dead-letter.
+
+Muốn tránh hẳn thì cấu hình ở **phía AWS**, không phải ở đây: filter policy trên
+subscription SNS, hoặc một queue cho mỗi loại khai ở `transports.sqs.queues`.
+
+### Đối soát vẫn đi qua HTTP
+
+SQS **không liệt kê được trạng thái hiện tại** — một hàng đợi chỉ đưa cho bạn thứ
+vừa thay đổi. Mà `sync:reconcile` đứng trên đúng phép liệt kê ấy. Nên hình dạng
+vận hành là **sự kiện qua SQS, ảnh chụp qua HTTP**:
+
+```php
+// config/platform-sync.php
+'default' => 'sqs',
+'reconcile' => ['transport' => 'poll'],
+```
+
+hoặc `sync:reconcile --transport=poll` từng lượt. Gõ `sync:reconcile` trên một hệ
+chạy SQS mà quên cả hai thì lệnh **dừng kèm một câu giải thích** nêu tên các
+transport chụp được — không phải một stack trace. (Bắt gõ `--transport=` mỗi lần
+nghĩa là một job có lịch quên gõ sẽ đỏ mãi mãi, và cách sửa nhanh nhất khi đó là
+gỡ luôn job đối soát — tức gỡ đúng chân duy nhất bắt được event bị mất hẳn.)
+
+Lộ trình ADR đặt đối soát ở **bước 2**, trước transport ở bước 3, đúng vì lý do
+này: nó là phép đo chứng minh bước 3 hoạt động.
 
 ## Cái Platform phải cung cấp
 
-1. **Transactional outbox** — ghi thay đổi domain và envelope trong CÙNG một
-   transaction. Thiếu cái này thì mọi thứ còn lại là trang trí: mất event sẽ xảy
-   ra và không ai biết.
-2. Feed `changes` có **cursor đục** + **ETag** (304 khi chưa có gì mới).
-3. Feed `snapshot` có cursor — chân đối soát.
-4. `resource` tra một tài nguyên; **404 nghĩa là đã xoá**, không phải lỗi —
-   consumer KHÔNG thử lại nó (chỉ lỗi mạng, 5xx và 429 mới được thử lại; thử lại
-   một câu trả lời hợp lệ là nhân ba tải lên Platform để nghe lại đúng cái nó
-   vừa nói).
-5. `sequence` **đơn điệu theo subject**, và nên kèm `prevsequence`.
-6. `data['id']` phải **khớp** phần id trong `subject`.
-7. Khoá ký + đường xoay khoá (JWKS), không phải một secret dán trong env.
+Theo ADR 0002, phần lớn khối lượng nằm ở repo Platform (`dxs-platform/platform`),
+không ở đây. Tempo là **bên nghe**.
 
-Feed `snapshot` **không** được trả 304: consumer không gửi `If-None-Match` ở đó
-có chủ đích, vì một trang rỗng đọc thành "Platform không giữ gì" và biến mọi
-hàng cục bộ thành mồ côi.
+### Đường mặc định (SQS)
+
+1. **Transactional outbox** — bảng `identity_outbox`, ghi trong **cùng
+   transaction** với thay đổi danh mục. Thiếu cái này thì mọi thứ còn lại là
+   trang trí: "ghi DB xong" và "phát event xong" không nguyên tử, và crash giữa
+   hai bước làm mất event hoặc phát event cho một thay đổi đã rollback.
+   ⚠️ Móc vào **Eloquent observer**, không phải controller — hai cây controller
+   cộng một đường ghi không-HTTP (seeder, tinker trong CD) thì móc ở controller
+   là chắc chắn sót, và sót thì im lặng.
+2. **Relay worker** đọc outbox → publish lên **SNS topic** (`ap-northeast-1`).
+3. **SQS queue cho mỗi consumer** + **DLQ** (`maxReceiveCount`, retention 14
+   ngày), tất cả bằng **Terraform** trong `infra/` của repo Platform — producer
+   sở hữu topic; thêm consumer về sau **không sửa gì phía producer**.
+   ⚠️ **Cảnh báo trên DLQ là điều kiện bắt buộc trước khi bật luồng thật.** Một
+   DLQ không ai nhìn chỉ là chỗ message đi chết yên lặng — nó biến "mất event" từ
+   sự cố ồn ào thành sự cố im lặng, đúng loại hỏng mà cả ADR sinh ra để chống.
+4. **Bật `RawMessageDelivery`** trên subscription, hoặc chấp nhận phong bì
+   `{"Type":"Notification","Message":"..."}` — driver mở được cả hai, nhưng chỉ
+   một trong hai là thứ bạn cố ý cấu hình.
+5. Cân nhắc **filter policy** để mỗi queue chỉ nhận loại tài nguyên consumer đó
+   thật sự chiếu (xem *Một hàng đợi chở mọi loại tài nguyên* ở trên).
+
+### Chung cho cả hai đường
+
+6. Envelope **CloudEvents 1.0**; `id` của nó **là** khoá idempotency.
+7. `sequence` **đơn điệu theo subject**, và nên kèm `prevsequence`.
+8. `data['id']` phải **khớp** phần id trong `subject`.
+9. **Feed `snapshot` có cursor** — chân đối soát, và nó là **HTTP**, kể cả khi
+   sự kiện đi qua SQS. Feed này **không** được trả 304: consumer không gửi
+   `If-None-Match` ở đó có chủ đích, vì một trang rỗng đọc thành "Platform không
+   giữ gì" và biến mọi hàng cục bộ thành mồ côi.
+10. Khoá ký + đường xoay khoá (JWKS), không phải một secret dán trong env.
+
+⚠️ **Chưa làm được — nói thẳng:** package này **không xác minh chữ ký nào**.
+Không JWKS, không RFC 9421, không `Aws\Sns\MessageValidator`. Thứ duy nhất đứng
+giữa "envelope do Platform phát" và "consumer tin nó" là **IAM**: chỉ SNS topic
+được ghi vào queue, chỉ consumer được đọc. Kênh SNS→SQS nằm trong mạng AWS nên
+lập luận đó là thật — nhưng nó **không** phải điều mục 10 đòi, và nó **không**
+phủ chân còn lại của ADR 0002: **SNS → HTTPS trực tiếp** cho CAEP, nơi payload đi
+qua Internet công khai và `MessageValidator` là bắt buộc. Chân đó chưa tồn tại ở
+đâu trong package này. Chỗ tự nhiên để cắm về sau nằm trong `SqsTransport::decode()`,
+ở nhánh mở bao SNS — xem docblock của lớp; đừng cài một lớp verify nửa vời, vì
+một lớp trông như đã canh còn tệ hơn không có lớp nào.
+
+### Chỉ cho phương án lùi (poll)
+
+11. Feed `changes` có **cursor đục** + **ETag** (304 khi chưa có gì mới).
+12. `resource` tra một tài nguyên; **404 nghĩa là đã xoá**, không phải lỗi —
+    consumer **không** thử lại nó (chỉ lỗi mạng, 5xx và 429 mới được thử lại;
+    thử lại một câu trả lời hợp lệ là nhân ba tải lên Platform để nghe lại đúng
+    cái nó vừa nói).
 
 ## Giao hàng
 

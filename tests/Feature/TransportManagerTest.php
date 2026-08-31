@@ -6,6 +6,7 @@ use Godx\Sync\Contracts\Transport;
 use Godx\Sync\Exceptions\UnknownTransport;
 use Godx\Sync\Transport\ArrayTransport;
 use Godx\Sync\Transport\PollTransport;
+use Godx\Sync\Transport\SqsTransport;
 use Godx\Sync\Transport\TransportManager;
 
 it('resolves the configured default', function (): void {
@@ -14,6 +15,19 @@ it('resolves the configured default', function (): void {
 
 it('resolves the poll driver', function (): void {
     expect(app(TransportManager::class)->transport('poll'))->toBeInstanceOf(PollTransport::class);
+});
+
+it('resolves the sqs driver without reaching for the network', function (): void {
+    // Dựng client KHÔNG được phân giải credential hay gọi metadata service:
+    // `TransportManager` dựng mọi transport để trả lời câu "cái nào chụp được",
+    // và một lượt gọi mạng ở đó biến một câu hỏi cấu hình thành một lần treo.
+    config()->set('platform-sync.transports.sqs', [
+        'driver' => 'sqs',
+        'queue_url' => 'https://sqs/tempo-identity-events',
+        'region' => 'ap-northeast-1',
+    ]);
+
+    expect(app(TransportManager::class)->transport('sqs'))->toBeInstanceOf(SqsTransport::class);
 });
 
 it('keys the cache by CONFIG name, not by driver', function (): void {
